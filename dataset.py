@@ -21,7 +21,7 @@ class Dataset(VisionDataset):
 
     def __init__(self,transform=None):
         self.file = self._list_name()
-        self.transform = transform
+        self._transform = transform
 
     def __len__(self):
         return len(self.file)
@@ -31,9 +31,12 @@ class Dataset(VisionDataset):
         img_path = 'data/train/img/{}'.format(name)
         ann_path = 'data/train/ann/{}.txt'.format(name)
         img = mx.img.imread(img_path,1)
-        bbox = ann_to_list(ann_path)
-        bbox = np.array(bbox)
-        return img,bbox
+        label = ann_to_list(ann_path)
+        if self._transform is not None:
+            return self._transform(img,label)
+        label = np.array(label)
+        return img,label
+
 
 def main():
     train_dataset = Dataset()

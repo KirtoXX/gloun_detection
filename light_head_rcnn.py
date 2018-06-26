@@ -10,6 +10,7 @@ from gluoncv.model_zoo.rcnn import RCNN
 from gluoncv.model_zoo.rpn import RPN
 import mxnet.ndarray as nd
 from mxnet import symbol
+import numpy as np
 
 __all__ = ['LHRCNN', 'get_LHRCNN',
            'faster_rcnn_resnet50_v2a_voc',
@@ -18,11 +19,13 @@ __all__ = ['LHRCNN', 'get_LHRCNN',
 class Group_Conv(nn.HybridBlock):
     def __init__(self,output_dim=490):
         super(Group_Conv, self).__init__()
-        self.conv1_1 = nn.Conv2D(256,(15,1),padding=(7,0),activation='relu')
-        self.conv1_2 = nn.Conv2D(output_dim,(1,15),padding=(0,7))
-        self.conv2_1 = nn.Conv2D(256,(1,15),padding=(0,7),activation='relu')
-        self.conv2_2 = nn.Conv2D(output_dim,(15,1),padding=(7,0))
-        self.bn = nn.BatchNorm()
+        with self.name_scope():
+            self.conv1_1 = nn.Conv2D(256,(15,1),padding=(7,0),activation='relu')
+            self.conv1_2 = nn.Conv2D(output_dim,(1,15),padding=(0,7))
+            self.conv2_1 = nn.Conv2D(256,(1,15),padding=(0,7),activation='relu')
+            self.conv2_2 = nn.Conv2D(output_dim,(15,1),padding=(7,0))
+            self.bn = nn.BatchNorm()
+            self.act = nn.Activation('relu')
 
     def forward(self, x, *args):
         x1 = self.conv1_1(x)
@@ -30,18 +33,18 @@ class Group_Conv(nn.HybridBlock):
         x2 = self.conv2_1(x)
         x2 = self.conv2_2(x2)
         out = self.bn(x1+x2)
-        out = nd.relu(out)
+        out = self.act(out)
         return out
 
 class Head(nn.HybridBlock):
     def __init__(self,nb_class):
         super(Head, self).__init__()
-        self.share = nn.Dense(2048,activation='relu')
-        self.clf = nn.Dense(nb_class,activation='softmax')
-        self.reg = nn.Dense(nb_class*4,activation='linear')
+        with self.name_scope():
+            self.share = nn.Dense(1024,activation='relu',weight_initializer=mx.init.Normal(0.01))
+            self.clf = nn.Dense(nb_class+1,weight_initializer=mx.init.Normal(0.01))
+            self.reg = nn.Dense(nb_class*4,weight_initializer=mx.init.Normal(0.01))
 
     def forward(self, x, *args):
-        x = nd.Flatten(x)
         x = self.share(x)
         clf = self.clf(x)
         reg = self.reg(x)
@@ -105,23 +108,22 @@ class LHRCNN(RCNN):
         to be sampled.
 
     """
-    def __init__(self, features, top_features, scales, ratios, classes, roi_mode, roi_size,
+    def __init__(self, backbone,scales, ratios, classes, roi_mode, roi_size,
                  stride=16, rpn_channel=1024, num_sample=128, pos_iou_thresh=0.5,
                  neg_iou_thresh_high=0.5, neg_iou_thresh_low=0.0, pos_ratio=0.25, **kwargs):
-        super(LHRCNN, self).__init__(
-            features, top_features, classes, roi_mode, roi_size, **kwargs)
+        #super from rcnn
+        super(LHRCNN, self).__init__(backbone,None,classes,roi_mode, roi_size,**kwargs)
         self.stride = stride
         self._max_batch = 1  # currently only support batch size = 1
         self._max_roi = 100000  # maximum allowed ROIs
         self._target_generator = set([RCNNTargetGenerator(self.num_class)])
+        self.k,_ = roi_size
         with self.name_scope():
             self.rpn = RPN(rpn_channel, stride, scales=scales, ratios=ratios)
             self.sampler = RCNNTargetSampler(num_sample, pos_iou_thresh, neg_iou_thresh_high,
                                             neg_iou_thresh_low, pos_ratio)
-            self.head = Head(classes)
-            k,_= self._roi_size
-            self.group_conv = Group_Conv(10*k*k)
-
+            self.head = Head(len(classes))
+            self.group_conv = Group_Conv(10*self.k*self.k)
 
     @property
     def target_generator(self):
@@ -188,11 +190,14 @@ class LHRCNN(RCNN):
         else:
             raise ValueError("Invalid roi mode: {}".format(self._roi_mode))
         '''
-        pooled_feat = nd.contrib.PSROIPooling(data=feat2,
+
+        pooled_feat = F.contrib.PSROIPooling(data=feat2,
                                               rois=rpn_roi,
                                               spatial_scale=1. / self.stride,
                                               output_dim=10,
-                                              pooled_size=self._roi_size)
+                                              pooled_size=self.k)
+
+        #print(pooled_feat.shape)
         # RCNN prediction
         '''
         top_feat = self.top_features(pooled_feat)
@@ -202,6 +207,9 @@ class LHRCNN(RCNN):
         box_pred = self.box_predictor(top_feat).reshape(
             (-1, self.num_class, 4)).transpose((1, 0, 2))
         '''
+        #print(pooled_feat.shape)
+        pooled_feat = F.flatten(pooled_feat)
+        #print(pooled_feat.shape)
         cls_pred,box_pred = self.head(pooled_feat)
         box_pred = box_pred.reshape((-1, self.num_class, 4)).transpose((1, 0, 2))
         # no need to convert bounding boxes in training, just return
@@ -234,127 +242,40 @@ class LHRCNN(RCNN):
         bboxes = F.slice_axis(result, axis=-1, begin=2, end=6)
         return ids, scores, bboxes
 
-def get_LHRCNN(name, features, top_features, scales, ratios, classes,
-               roi_mode, roi_size, dataset, stride=16,
-               rpn_channel=1024, pretrained=False, ctx=mx.cpu(),
-               root=os.path.join('~', '.mxnet', 'models'), **kwargs):
-    r"""Utility function to return faster rcnn networks.
 
-    Parameters
-    ----------
-    name : str
-        Model name.
-    features : gluon.HybridBlock
-        Base feature extractor before feature pooling layer.
-    top_features : gluon.HybridBlock
-        Tail feature extractor after feature pooling layer.
-    scales : iterable of float
-        The areas of anchor boxes.
-        We use the following form to compute the shapes of anchors:
-
-        .. math::
-
-            width_{anchor} = size_{base} \times scale \times \sqrt{ 1 / ratio}
-            height_{anchor} = size_{base} \times scale \times \sqrt{ratio}
-
-    ratios : iterable of float
-        The aspect ratios of anchor boxes. We expect it to be a list or tuple.
-    classes : iterable of str
-        Names of categories, its length is ``num_class``.
-    roi_mode : str
-        ROI pooling mode. Currently support 'pool' and 'align'.
-    roi_size : tuple of int, length 2
-        (height, width) of the ROI region.
-    dataset : str
-        The name of dataset.
-    stride : int, default is 16
-        Feature map stride with respect to original image.
-        This is usually the ratio between original image size and feature map size.
-    rpn_channel : int, default is 1024
-        Channel number used in RPN convolutional layers.
-    pretrained : bool, optional, default is False
-        Load pretrained weights.
-    ctx : mxnet.Context
-        Context such as mx.cpu(), mx.gpu(0).
-    root : str
-        Model weights storing path.
-
-    Returns
-    -------
-    mxnet.gluon.HybridBlock
-        The Faster-RCNN network.
-
-    """
-    net = LHRCNN(features, top_features, scales, ratios, classes, roi_mode, roi_size,
-                 stride=stride, rpn_channel=rpn_channel, **kwargs)
-    if pretrained:
-        '''
-        from ..model_store import get_model_file
-        full_name = '_'.join(('faster_rcnn', name, dataset))
-        net.load_params(get_model_file(full_name, root=root), ctx=ctx)
-        '''
-    return net
-
-
-def My_LHRCNN(pretrained=False, pretrained_base=True, **kwargs):
-    r"""Faster RCNN model from the paper
-    "Ren, S., He, K., Girshick, R., & Sun, J. (2015). Faster r-cnn: Towards
-    real-time object detection with region proposal networks"
-
-    Parameters
-    ----------
-    pretrained : bool, optional, default is False
-        Load pretrained weights.
-    pretrained_base : bool, optional, default is True
-        Load pretrained base network, the extra layers are randomized. Note that
-        if pretrained is `Ture`, this has no effect.
-    ctx : Context, default CPU
-        The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
-        Location for keeping the model parameters.
-
-    Examples
-    --------
-    #>>> model = get_faster_rcnn_resnet50_v2_voc(pretrained=True)
-    #>>> print(model)
-    """
-    from gluoncv.data import VOCDetection
-    classes = VOCDetection.CLASSES
+def My_LHRCNN():
     my_class = []
     for i in range(60):
         my_class.append(str(i+1))
-    '''
-    if pretrained:
-        pretrained_base = True
-    else:
-        pretrained_base = False
-    '''
     from gluoncv.model_zoo.faster_rcnn.resnet50_v2a import resnet50_v2a
-    #from ...data import COCODetection
-    #classes = COCODetection.CLASSES
-    pretrained_base = False if pretrained else pretrained_base
-    base_network = resnet50_v2a(pretrained=False)
-    load_weight(base_network)
+    #---init-----
+    base_network = resnet50_v2a(pretrained=True)
     features = nn.HybridSequential()
-    top_features = nn.HybridSequential()
     for layer in ['rescale'] + ['layer' + str(i) for i in range(4)]:
         features.add(getattr(base_network, layer))
     for layer in ['layer4']:
-        top_features.add(getattr(base_network, layer))
-    train_patterns = '|'.join(['.*head','.*group_conv','.*rpn', '.*stage(2|3|4)_conv'])
-    model = get_LHRCNN('resnet50_v2', features, top_features, scales=(2, 4, 8, 16, 32),
-                      ratios=(0.5, 1, 2), classes=my_class, dataset='voc',
-                      roi_mode='align', roi_size=(7,7), stride=16,
-                      rpn_channel=1024, train_patterns=train_patterns,
-                      pretrained=pretrained, **kwargs)
+        features.add(getattr(base_network, layer))
+    train_patterns = '|'.join(['.*head','*group_conv', '.*rpn','.*stage(2|3|4)_conv'])
+    model = LHRCNN(backbone=features,scales=(2, 4, 8, 16, 32),
+                   ratios=(0.5, 1, 2),
+                   roi_size=(7,7),
+                   stride=32,
+                   rpn_channel=512,
+                   classes=my_class,
+                   roi_mode='align',
+                   train_patterns=None)
     print('build finish!')
     return model
 
-def load_weight(model):
-    from gluoncv.model_zoo.model_store import get_model_file
-    model.load_params(get_model_file('resnet{}_v{}a'.format(50,2),
-                                     root='pretrained/'), ctx=mx.cpu(), allow_missing=True)
-    for v in model.collect_params(select='init_scale|init_mean').values():
-        v.initialize(force_reinit=True)
-    print('weight load finsih!')
-    return model
+def main():
+    net = My_LHRCNN()
+    net.initialize()
+    data = np.zeros((1,3,800,800))
+    x = nd.array(data)
+    x1,x2,x3 = net(x)
+    print(x1.shape)
+    print(x2.shape)
+    print(x3.shape)
+
+if __name__ == '__main__':
+    main()
