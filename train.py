@@ -23,6 +23,7 @@ from gluoncv.utils.metrics.accuracy import Accuracy
 from dataset import Dataset
 from gluoncv import model_zoo
 from light_head_rcnn import My_LHRCNN
+from faster_rcnn import Faster_rcnn
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Faster-RCNN networks e2e.')
@@ -73,30 +74,16 @@ def parse_args():
     parser.add_argument('--verbose', dest='verbose', action='store_true',
                         help='Print helpful debugging info once set.')
     args = parser.parse_args()
-    if args.dataset == 'voc':
-        args.short = int(args.short) if args.short else 600
-        args.max_size = int(args.max_size) if args.max_size else 1000
-        args.epochs = int(args.epochs) if args.epochs else 100
-        args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '14,20'
-        args.lr = float(args.lr) if args.lr else 0.001
-        args.lr_warmup = args.lr_warmup if args.lr_warmup else -1
-        args.wd = float(args.wd) if args.wd else 5e-4
-    elif args.dataset == 'coco':
-        args.short = int(args.short) if args.short else 800
-        args.max_size = int(args.max_size) if args.max_size else 1333
-        args.epochs = int(args.epochs) if args.epochs else 100
-        args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '16,21'
-        args.lr = float(args.lr) if args.lr else 0.00125
-        args.lr_warmup = args.lr_warmup if args.lr_warmup else 8000
-        args.wd = float(args.wd) if args.wd else 1e-4
-        num_gpus = len(args.gpus.split(','))
-        if num_gpus == 1:
-            args.lr_warmup = -1
-        else:
-            args.lr *=  num_gpus
-            args.lr_warmup /= num_gpus
-    return args
 
+    args.short = int(args.short) if args.short else 800
+    args.max_size = int(args.max_size) if args.max_size else 1024
+    args.epochs = int(args.epochs) if args.epochs else 200
+    args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '14,20'
+    args.lr = float(args.lr) if args.lr else 0.001
+    args.lr_warmup = args.lr_warmup if args.lr_warmup else -1
+    args.wd = float(args.wd) if args.wd else 5e-4
+
+    return args
 
 class RPNAccMetric(mx.metric.EvalMetric):
     def __init__(self):
@@ -178,21 +165,6 @@ class RCNNL1LossMetric(mx.metric.EvalMetric):
         self.sum_metric += loss.asscalar()
         self.num_inst += num_inst.asscalar()
 
-def get_dataset(dataset, args):
-    if dataset.lower() == 'voc':
-        train_dataset = gdata.VOCDetection(
-            splits=[(2007, 'trainval'), (2012, 'trainval')])
-        val_dataset = gdata.VOCDetection(
-            splits=[(2007, 'test')])
-        val_metric = VOC07MApMetric(iou_thresh=0.5, class_names=val_dataset.classes)
-    elif dataset.lower() == 'coco':
-        train_dataset = gdata.COCODetection(splits='instances_train2017')
-        val_dataset = gdata.COCODetection(splits='instances_val2017', skip_empty=False)
-        val_metric = COCODetectionMetric(val_dataset, args.save_prefix + '_eval', cleanup=True)
-    else:
-        raise NotImplementedError('Dataset: {} not implemented.'.format(dataset))
-    return train_dataset, val_dataset, val_metric
-
 def get_dataloader(net, train_dataset,batch_size, num_workers,short=800, max_size=1024):
     """Get dataloader."""
     train_bfn = batchify.Tuple(*[batchify.Append() for _ in range(5)])
@@ -270,8 +242,8 @@ def train(args):
     ctx = ctx if ctx else [mx.cpu()]
     print(ctx)
     args.batch_size = len(ctx)
-    net = model_zoo.get_model('faster_rcnn_resnet50_v2a_voc', pretrained_base=True)
-    #net = My_LHRCNN()
+    #net = Faster_rcnn(pretrained_base=True)
+    net = My_LHRCNN()
     #-----init-------------
     for param in net.collect_params().values():
         if param._data is not None:
@@ -285,6 +257,7 @@ def train(args):
     #####################################
     """Training pipeline"""
     net.collect_params().reset_ctx(ctx)
+    '''only train parms without pretrained!!!'''
     trainer = gluon.Trainer(
         net.collect_train_params(),  # fix batchnorm, fix first stage, etc...
         'sgd',
@@ -336,6 +309,7 @@ def train(args):
             lr_steps.pop(0)
             trainer.set_learning_rate(new_lr)
             logger.info("[Epoch {}] Set learning rate to {}".format(epoch, new_lr))
+        trainer.set_learning_rate(trainer.learning_rate*0.9)
         for metric in metrics:
             metric.reset()
         tic = time.time()
@@ -402,7 +376,7 @@ def train(args):
             btic = time.time()
         msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics])
         logger.info('[Epoch {}] Training cost: {:.3f}, {}'.format(epoch, (time.time()-tic), msg))
-    net.save_parameters('weights/frcnn.pkl')
+    net.save_parameters('weights/frcnn_0.pkl')
 
 
 if __name__ == '__main__':

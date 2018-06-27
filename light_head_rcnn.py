@@ -11,6 +11,8 @@ from gluoncv.model_zoo.rpn import RPN
 import mxnet.ndarray as nd
 from mxnet import symbol
 import numpy as np
+from gluoncv.nn.bbox import BBoxCornerToCenter
+from gluoncv.nn.coder import NormalizedBoxCenterDecoder, MultiPerClassDecoder
 
 __all__ = ['LHRCNN', 'get_LHRCNN',
            'faster_rcnn_resnet50_v2a_voc',
@@ -50,7 +52,7 @@ class Head(nn.HybridBlock):
         reg = self.reg(x)
         return clf,reg
 
-class LHRCNN(RCNN):
+class LHRCNN(nn.HybridBlock):
     r"""Faster RCNN network.
 
     Parameters
@@ -108,22 +110,35 @@ class LHRCNN(RCNN):
         to be sampled.
 
     """
-    def __init__(self, backbone,scales, ratios, classes, roi_mode, roi_size,
+    def __init__(self, features,scales, ratios, classes,roi_size,
                  stride=16, rpn_channel=1024, num_sample=128, pos_iou_thresh=0.5,
-                 neg_iou_thresh_high=0.5, neg_iou_thresh_low=0.0, pos_ratio=0.25, **kwargs):
+                 neg_iou_thresh_high=0.5, neg_iou_thresh_low=0.0, pos_ratio=0.25,
+                 nms_thresh=0.3, nms_topk=400, post_nms=100):
         #super from rcnn
-        super(LHRCNN, self).__init__(backbone,None,classes,roi_mode, roi_size,**kwargs)
+        super(LHRCNN, self).__init__()
         self.stride = stride
         self._max_batch = 1  # currently only support batch size = 1
         self._max_roi = 100000  # maximum allowed ROIs
+        self.num_class = len(classes)+1
         self._target_generator = set([RCNNTargetGenerator(self.num_class)])
         self.k,_ = roi_size
+        #--------RCNN parms--------
+        self.train_patterns = None
+        self.nms_thresh = nms_thresh
+        self.nms_topk = nms_topk
+        self.post_nms = post_nms
         with self.name_scope():
+            #-------ligth head rcnn setting-------
             self.rpn = RPN(rpn_channel, stride, scales=scales, ratios=ratios)
             self.sampler = RCNNTargetSampler(num_sample, pos_iou_thresh, neg_iou_thresh_high,
                                             neg_iou_thresh_low, pos_ratio)
             self.head = Head(len(classes))
             self.group_conv = Group_Conv(10*self.k*self.k)
+            #-------rcnn setting---------------
+            self.box_to_center = BBoxCornerToCenter()
+            self.box_decoder = NormalizedBoxCenterDecoder()
+            self.cls_decoder = MultiPerClassDecoder(num_class=self.num_class + 1)
+            self.features = features
 
     @property
     def target_generator(self):
@@ -136,6 +151,29 @@ class LHRCNN(RCNN):
 
         """
         return list(self._target_generator)[0]
+
+    def collect_train_params(self, select=None):
+        """Collect trainable params.
+
+        This function serves as a help utility function to return only
+        trainable parameters if predefined by experienced developer/researcher.
+        For example, if cross-device BatchNorm is not enabled, we will definitely
+        want to fix BatchNorm statistics to avoid scaling problem because RCNN training
+        batch size is usually very small.
+
+        Parameters
+        ----------
+        select : select : str
+            Regular expressions for parameter match pattern
+
+        Returns
+        -------
+        The selected :py:class:`mxnet.gluon.ParameterDict`
+
+        """
+        if select is None:
+            return self.collect_params(self.train_patterns)
+        return self.collect_params(select)
 
     # pylint: disable=arguments-differ
     def hybrid_forward(self, F, x, gt_box=None):
@@ -207,9 +245,9 @@ class LHRCNN(RCNN):
         box_pred = self.box_predictor(top_feat).reshape(
             (-1, self.num_class, 4)).transpose((1, 0, 2))
         '''
-        #print(pooled_feat.shape)
+        print(pooled_feat.shape)
         pooled_feat = F.flatten(pooled_feat)
-        #print(pooled_feat.shape)
+        print(pooled_feat.shape)
         cls_pred,box_pred = self.head(pooled_feat)
         box_pred = box_pred.reshape((-1, self.num_class, 4)).transpose((1, 0, 2))
         # no need to convert bounding boxes in training, just return
@@ -255,27 +293,24 @@ def My_LHRCNN():
         features.add(getattr(base_network, layer))
     for layer in ['layer4']:
         features.add(getattr(base_network, layer))
-    train_patterns = '|'.join(['.*head','*group_conv', '.*rpn','.*stage(2|3|4)_conv'])
-    model = LHRCNN(backbone=features,scales=(2, 4, 8, 16, 32),
+    model = LHRCNN(features=features,scales=(2, 4, 8, 16, 32),
                    ratios=(0.5, 1, 2),
                    roi_size=(7,7),
                    stride=32,
                    rpn_channel=512,
-                   classes=my_class,
-                   roi_mode='align',
-                   train_patterns=None)
+                   classes=my_class)
     print('build finish!')
     return model
 
 def main():
     net = My_LHRCNN()
-    net.initialize()
+    for param in net.collect_params().values():
+        if param._data is not None:
+            continue
+        param.initialize()
     data = np.zeros((1,3,800,800))
     x = nd.array(data)
-    x1,x2,x3 = net(x)
-    print(x1.shape)
-    print(x2.shape)
-    print(x3.shape)
+    y1,y2,y3 = net(x)
 
 if __name__ == '__main__':
     main()

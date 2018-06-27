@@ -40,13 +40,7 @@ class Dataset(VisionDataset):
 
 def main():
     train_dataset = Dataset()
-    train_image, train_label = train_dataset[0]
-    bboxes = train_label[:, :4]
-    cids = train_label[:, 4:5]
-    print('image:', train_image.shape)
-    print('bboxes:', bboxes.shape, 'class ids:', cids.shape)
-    ax = viz.plot_bbox(train_image.asnumpy(), bboxes, labels=cids)
-    plt.show()
+    print(train_dataset.__len__())
 
 
 
