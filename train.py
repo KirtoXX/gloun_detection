@@ -1,3 +1,8 @@
+"""Train Faster-RCNN end to end."""
+import argparse
+import os
+# disable autotune
+os.environ['MXNET_CUDNN_AUTOTUNE_DEFAULT'] = '0'
 import logging
 import time
 import numpy as np
@@ -5,13 +10,92 @@ import mxnet as mx
 from mxnet import nd
 from mxnet import gluon
 from mxnet import autograd
+import gluoncv as gcv
+from gluoncv import data as gdata
+from gluoncv import utils as gutils
+from gluoncv.model_zoo import get_model
 from gluoncv.data import batchify
 from gluoncv.data.transforms.presets.rcnn import FasterRCNNDefaultTrainTransform
-from light_head_rcnn import My_LHRCNN
-import os
+from gluoncv.data.transforms.presets.rcnn import FasterRCNNDefaultValTransform
+from gluoncv.utils.metrics.voc_detection import VOC07MApMetric
+from gluoncv.utils.metrics.coco_detection import COCODetectionMetric
+from gluoncv.utils.metrics.accuracy import Accuracy
 from dataset import Dataset
-import argparse
 from gluoncv import model_zoo
+from light_head_rcnn import My_LHRCNN
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train Faster-RCNN networks e2e.')
+    parser.add_argument('--network', type=str, default='resnet50_v2a',
+                        help="Base network name which serves as feature extraction base.")
+    parser.add_argument('--dataset', type=str, default='voc',
+                        help='Training dataset. Now support voc.')
+    parser.add_argument('--short', type=str, default='',
+                        help='Resize image to the given short side side, default to 600 for voc.')
+    parser.add_argument('--max-size', type=str, default='',
+                        help='Max size of either side of image, default to 1000 for voc.')
+    parser.add_argument('--num-workers', '-j', dest='num_workers', type=int,
+                        default=4, help='Number of data workers, you can use larger '
+                        'number to accelerate data loading, if you CPU and GPUs are powerful.')
+    parser.add_argument('--gpus', type=str, default='0',
+                        help='Training with GPUs, you can specify 1,3 for example.')
+    parser.add_argument('--epochs', type=str, default='',
+                        help='Training epochs.')
+    parser.add_argument('--resume', type=str, default='',
+                        help='Resume from previously saved parameters if not None. '
+                        'For example, you can resume from ./faster_rcnn_xxx_0123.params')
+    parser.add_argument('--start-epoch', type=int, default=0,
+                        help='Starting epoch for resuming, default is 0 for new training.'
+                        'You can specify it to 100 for example to start from 100 epoch.')
+    parser.add_argument('--lr', type=str, default='',
+                        help='Learning rate, default is 0.001 for voc single gpu training.')
+    parser.add_argument('--lr-decay', type=float, default=0.1,
+                        help='decay rate of learning rate. default is 0.1.')
+    parser.add_argument('--lr-decay-epoch', type=str, default='',
+                        help='epoches at which learning rate decays. default is 14,20 for voc.')
+    parser.add_argument('--lr-warmup', type=str, default='',
+                        help='warmup iterations to adjust learning rate, default is 0 for voc.')
+    parser.add_argument('--momentum', type=float, default=0.9,
+                        help='SGD momentum, default is 0.9')
+    parser.add_argument('--wd', type=str, default='',
+                        help='Weight decay, default is 5e-4 for voc')
+    parser.add_argument('--log-interval', type=int, default=100,
+                        help='Logging mini-batch interval. Default is 100.')
+    parser.add_argument('--save-prefix', type=str, default='',
+                        help='Saving parameter prefix')
+    parser.add_argument('--save-interval', type=int, default=1,
+                        help='Saving parameters epoch interval, best model will always be saved.')
+    parser.add_argument('--val-interval', type=int, default=1,
+                        help='Epoch interval for validation, increase the number will reduce the '
+                             'training time if validation is slow.')
+    parser.add_argument('--seed', type=int, default=233,
+                        help='Random seed to be fixed.')
+    parser.add_argument('--verbose', dest='verbose', action='store_true',
+                        help='Print helpful debugging info once set.')
+    args = parser.parse_args()
+    if args.dataset == 'voc':
+        args.short = int(args.short) if args.short else 600
+        args.max_size = int(args.max_size) if args.max_size else 1000
+        args.epochs = int(args.epochs) if args.epochs else 20
+        args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '14,20'
+        args.lr = float(args.lr) if args.lr else 0.001
+        args.lr_warmup = args.lr_warmup if args.lr_warmup else -1
+        args.wd = float(args.wd) if args.wd else 5e-4
+    elif args.dataset == 'coco':
+        args.short = int(args.short) if args.short else 800
+        args.max_size = int(args.max_size) if args.max_size else 1333
+        args.epochs = int(args.epochs) if args.epochs else 24
+        args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '16,21'
+        args.lr = float(args.lr) if args.lr else 0.00125
+        args.lr_warmup = args.lr_warmup if args.lr_warmup else 8000
+        args.wd = float(args.wd) if args.wd else 1e-4
+        num_gpus = len(args.gpus.split(','))
+        if num_gpus == 1:
+            args.lr_warmup = -1
+        else:
+            args.lr *=  num_gpus
+            args.lr_warmup /= num_gpus
+    return args
 
 
 class RPNAccMetric(mx.metric.EvalMetric):
@@ -94,15 +178,42 @@ class RCNNL1LossMetric(mx.metric.EvalMetric):
         self.sum_metric += loss.asscalar()
         self.num_inst += num_inst.asscalar()
 
-def get_dataloader(net, train_dataset,batch_size, num_workers):
+def get_dataset(dataset, args):
+    if dataset.lower() == 'voc':
+        train_dataset = gdata.VOCDetection(
+            splits=[(2007, 'trainval'), (2012, 'trainval')])
+        val_dataset = gdata.VOCDetection(
+            splits=[(2007, 'test')])
+        val_metric = VOC07MApMetric(iou_thresh=0.5, class_names=val_dataset.classes)
+    elif dataset.lower() == 'coco':
+        train_dataset = gdata.COCODetection(splits='instances_train2017')
+        val_dataset = gdata.COCODetection(splits='instances_val2017', skip_empty=False)
+        val_metric = COCODetectionMetric(val_dataset, args.save_prefix + '_eval', cleanup=True)
+    else:
+        raise NotImplementedError('Dataset: {} not implemented.'.format(dataset))
+    return train_dataset, val_dataset, val_metric
+
+def get_dataloader(net, train_dataset,batch_size, num_workers,short=800, max_size=1024):
     """Get dataloader."""
-    short, max_size = 800,1024
     train_bfn = batchify.Tuple(*[batchify.Append() for _ in range(5)])
-    #train_dataset.transform = FasterRCNNDefaultTrainTransform(short, max_size, net)
     train_loader = mx.gluon.data.DataLoader(
         train_dataset.transform(FasterRCNNDefaultTrainTransform(short, max_size, net)),
-        batch_size, True, batchify_fn=train_bfn, last_batch='rollover',num_workers=num_workers)
+        batch_size, True, batchify_fn=train_bfn, last_batch='rollover', num_workers=num_workers)
     return train_loader
+
+def save_params(net, logger, best_map, current_map, epoch, save_interval, prefix):
+    current_map = float(current_map)
+    if current_map > best_map[0]:
+        logger.info('[Epoch {}] mAP {} higher than current best {} saving to {}'.format(
+                    epoch, current_map, best_map, '{:s}_best.params'.format(prefix)))
+        best_map[0] = current_map
+        net.save_parameters('{:s}_best.params'.format(prefix))
+        with open(prefix+'_best_map.log', 'a') as f:
+            f.write('\n{:04d}:\t{:.4f}'.format(epoch, current_map))
+    if save_interval and (epoch + 1) % save_interval == 0:
+        logger.info('[Epoch {}] Saving parameters to {}'.format(
+            epoch, '{:s}_{:04d}_{:.4f}.params'.format(prefix, epoch, current_map)))
+        net.save_parameters('{:s}_{:04d}_{:.4f}.params'.format(prefix, epoch, current_map))
 
 def split_and_load(batch, ctx_list):
     """Split data to 1 batch each device."""
@@ -113,50 +224,43 @@ def split_and_load(batch, ctx_list):
         new_batch.append(new_data)
     return new_batch
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Train Faster-RCNN networks e2e.')
-    parser.add_argument('--network', type=str, default='resnet50_v2a',
-                        help="Base network name which serves as feature extraction base.")
-    parser.add_argument('--dataset', type=str, default='voc',
-                        help='Training dataset. Now support voc.')
-    parser.add_argument('--num-workers', '-j', dest='num_workers', type=int,
-                        default=2, help='Number of data workers, you can use larger '
-                        'number to accelerate data loading, if you CPU and GPUs are powerful.')
-    parser.add_argument('--gpus', type=str, default='0',
-                        help='Training with GPUs, you can specify 1,3 for example.')
-    parser.add_argument('--epochs', type=int, default=30,
-                        help='Training epochs.')
-    parser.add_argument('--resume', type=str, default='',
-                        help='Resume from previously saved parameters if not None. '
-                        'For example, you can resume from ./faster_rcnn_xxx_0123.params')
-    parser.add_argument('--start-epoch', type=int, default=0,
-                        help='Starting epoch for resuming, default is 0 for new training.'
-                        'You can specify it to 100 for example to start from 100 epoch.')
-    parser.add_argument('--lr', type=float, default=0.001,
-                        help='Learning rate, default is 0.001')
-    parser.add_argument('--lr-decay', type=float, default=0.1,
-                        help='decay rate of learning rate. default is 0.1.')
-    parser.add_argument('--lr-decay-epoch', type=str, default='14,20',
-                        help='epoches at which learning rate decays. default is 14,20.')
-    parser.add_argument('--momentum', type=float, default=0.9,
-                        help='SGD momentum, default is 0.9')
-    parser.add_argument('--wd', type=float, default=0.0005,
-                        help='Weight decay, default is 5e-4')
-    parser.add_argument('--log-interval', type=int, default=100,
-                        help='Logging mini-batch interval. Default is 100.')
-    parser.add_argument('--save-prefix', type=str, default='',
-                        help='Saving parameter prefix')
-    parser.add_argument('--save-interval', type=int, default=1,
-                        help='Saving parameters epoch interval, best model will always be saved.')
-    parser.add_argument('--val-interval', type=int, default=1,
-                        help='Epoch interval for validation, increase the number will reduce the '
-                             'training time if validation is slow.')
-    parser.add_argument('--seed', type=int, default=233,
-                        help='Random seed to be fixed.')
-    parser.add_argument('--verbose', dest='verbose', action='store_true',
-                        help='Print helpful debugging info once set.')
-    args = parser.parse_args()
-    return args
+def validate(net, val_data, ctx, eval_metric):
+    """Test on validation dataset."""
+    eval_metric.reset()
+    # set nms threshold and topk constraint
+    net.set_nms(nms_thresh=0.3, nms_topk=400)
+    net.hybridize(static_alloc=True)
+    for batch in val_data:
+        batch = split_and_load(batch, ctx_list=ctx)
+        det_bboxes = []
+        det_ids = []
+        det_scores = []
+        gt_bboxes = []
+        gt_ids = []
+        gt_difficults = []
+        for x, y, im_scale in zip(*batch):
+            # get prediction results
+            ids, scores, bboxes = net(x)
+            det_ids.append(ids.expand_dims(0))
+            det_scores.append(scores.expand_dims(0))
+            # clip to image size
+            det_bboxes.append(mx.nd.Custom(bboxes, x, op_type='bbox_clip_to_image').expand_dims(0))
+            # rescale to original resolution
+            im_scale = im_scale.reshape((-1)).asscalar()
+            det_bboxes[-1] *= im_scale
+            # split ground truths
+            gt_ids.append(y.slice_axis(axis=-1, begin=4, end=5))
+            gt_bboxes.append(y.slice_axis(axis=-1, begin=0, end=4))
+            gt_bboxes[-1] *= im_scale
+            gt_difficults.append(y.slice_axis(axis=-1, begin=5, end=6) if y.shape[-1] > 5 else None)
+
+        # update metric
+        for det_bbox, det_id, det_score, gt_bbox, gt_id, gt_diff in zip(det_bboxes, det_ids, det_scores, gt_bboxes, gt_ids, gt_difficults):
+            eval_metric.update(det_bbox, det_id, det_score, gt_bbox, gt_id, gt_diff)
+    return eval_metric.get()
+
+def get_lr_at_iter(alpha):
+    return 1. / 3. * (1 - alpha) + alpha
 
 def train(args):
     ######################################
@@ -166,15 +270,21 @@ def train(args):
     ctx = ctx if ctx else [mx.cpu()]
     print(ctx)
     args.batch_size = len(ctx)
+    net = model_zoo.get_model('faster_rcnn_resnet50_v2a_voc', pretrained_base=True)
     #net = My_LHRCNN()
-    net = model_zoo.get_model('faster_rcnn_resnet50_v2a_voc', pretrained_base=False)
-    net.initialize()
+    #-----init-------------
+    for param in net.collect_params().values():
+        if param._data is not None:
+            continue
+        param.initialize()
+    #----------------------
     train_dataset = Dataset()
-    train_data = get_dataloader(net, train_dataset,args.batch_size, args.num_workers)
+    args.batch_size = 1
+    args.num_workers = 1
+    train_data = get_dataloader(net, train_dataset, args.batch_size, args.num_workers)
     #####################################
     """Training pipeline"""
-    #net.collect_params().reset_ctx(ctx)
-    net.collect_train_params().reset_ctx(ctx)
+    net.collect_params().reset_ctx(ctx)
     trainer = gluon.Trainer(
         net.collect_train_params(),  # fix batchnorm, fix first stage, etc...
         'sgd',
@@ -186,16 +296,17 @@ def train(args):
     # lr decay policy
     lr_decay = float(args.lr_decay)
     lr_steps = sorted([float(ls) for ls in args.lr_decay_epoch.split(',') if ls.strip()])
+    lr_warmup = int(args.lr_warmup)
 
     # TODO(zhreshold) losses?
     rpn_cls_loss = mx.gluon.loss.SigmoidBinaryCrossEntropyLoss(from_sigmoid=False)
-    rpn_box_loss = mx.gluon.loss.HuberLoss(rho=1 / 9.)  # == smoothl1
+    rpn_box_loss = mx.gluon.loss.HuberLoss(rho=1/9.)  # == smoothl1
     rcnn_cls_loss = mx.gluon.loss.SoftmaxCrossEntropyLoss()
     rcnn_box_loss = mx.gluon.loss.HuberLoss()  # == smoothl1
     metrics = [mx.metric.Loss('RPN_Conf'),
                mx.metric.Loss('RPN_SmoothL1'),
                mx.metric.Loss('RCNN_CrossEntropy'),
-               mx.metric.Loss('RCNN_SmoothL1'), ]
+               mx.metric.Loss('RCNN_SmoothL1'),]
 
     rpn_acc_metric = RPNAccMetric()
     rpn_bbox_metric = RPNL1LossMetric()
@@ -220,7 +331,6 @@ def train(args):
     logger.info('Start training from [Epoch {}]'.format(args.start_epoch))
     best_map = [0]
     for epoch in range(args.start_epoch, args.epochs):
-        print('Epoch:{}/{}'.format(epoch,args.epochs))
         while lr_steps and epoch >= lr_steps[0]:
             new_lr = trainer.learning_rate * lr_decay
             lr_steps.pop(0)
@@ -230,9 +340,14 @@ def train(args):
             metric.reset()
         tic = time.time()
         btic = time.time()
-        net.hybridize()
+        net.hybridize(static_alloc=True)
+        base_lr = trainer.learning_rate
         for i, batch in enumerate(train_data):
-            print(train_data)
+            if epoch == 0 and i <= lr_warmup:
+                new_lr = base_lr * get_lr_at_iter((i // 500) / (lr_warmup / 500.))
+                if new_lr != trainer.learning_rate:
+                    logger.info('[Epoch 0 Iteration {}] Set learning rate to {}'.format(i, new_lr))
+                    trainer.set_learning_rate(new_lr)
             batch = split_and_load(batch, ctx_list=ctx)
             batch_size = len(batch[0])
             losses = []
@@ -249,8 +364,7 @@ def train(args):
                     # losses of rpn
                     rpn_score = rpn_score.squeeze(axis=-1)
                     num_rpn_pos = (rpn_cls_targets >= 0).sum()
-                    rpn_loss1 = rpn_cls_loss(rpn_score, rpn_cls_targets,
-                                             rpn_cls_targets >= 0) * rpn_cls_targets.size / num_rpn_pos
+                    rpn_loss1 = rpn_cls_loss(rpn_score, rpn_cls_targets, rpn_cls_targets >= 0) * rpn_cls_targets.size / num_rpn_pos
                     rpn_loss2 = rpn_box_loss(rpn_box, rpn_box_targets, rpn_box_masks) * rpn_box.size / num_rpn_pos
                     # rpn overall loss, use sum rather than average
                     rpn_loss = rpn_loss1 + rpn_loss2
@@ -258,18 +372,17 @@ def train(args):
                     cls_targets, box_targets, box_masks = net.target_generator(roi, samples, matches, gt_label, gt_box)
                     # losses of rcnn
                     num_rcnn_pos = (cls_targets >= 0).sum()
-                    rcnn_loss1 = rcnn_cls_loss(cls_pred, cls_targets, cls_targets >= 0) * cls_targets.size / \
-                                 cls_targets.shape[0] / num_rcnn_pos
-                    rcnn_loss2 = rcnn_box_loss(box_pred, box_targets, box_masks) * box_pred.size / box_pred.shape[
-                        0] / num_rcnn_pos
+                    rcnn_loss1 = rcnn_cls_loss(cls_pred, cls_targets, cls_targets >= 0) * cls_targets.size / cls_targets.shape[0] / num_rcnn_pos
+                    rcnn_loss2 = rcnn_box_loss(box_pred, box_targets, box_masks) * box_pred.size / box_pred.shape[0] / num_rcnn_pos
                     rcnn_loss = rcnn_loss1 + rcnn_loss2
                     # overall losses
                     losses.append(rpn_loss.sum() + rcnn_loss.sum())
+                    #total_loss = rpn_loss.sum()+rcnn_loss.sum()
                     metric_losses[0].append(rpn_loss1.sum())
                     metric_losses[1].append(rpn_loss2.sum())
                     metric_losses[2].append(rcnn_loss1.sum())
                     metric_losses[3].append(rcnn_loss2.sum())
-                    add_losses[0].append([[rpn_cls_targets, rpn_cls_targets >= 0], [rpn_score]])
+                    add_losses[0].append([[rpn_cls_targets, rpn_cls_targets>=0], [rpn_score]])
                     add_losses[1].append([[rpn_box_targets, rpn_box_masks], [rpn_box]])
                     add_losses[2].append([[cls_targets], [cls_pred]])
                     add_losses[3].append([[box_targets, box_masks], [box_pred]])
@@ -285,11 +398,11 @@ def train(args):
                 # msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics])
                 msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics + metrics2])
                 logger.info('[Epoch {}][Batch {}], Speed: {:.3f} samples/sec, {}'.format(
-                    epoch, i, batch_size / (time.time() - btic), msg))
+                    epoch, i, batch_size/(time.time()-btic), msg))
             btic = time.time()
 
         msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics])
-        logger.info('[Epoch {}] Training cost: {:.3f}, {}'.format(epoch, (time.time() - tic), msg))
+        logger.info('[Epoch {}] Training cost: {:.3f}, {}'.format(epoch, (time.time()-tic), msg))
         '''
         if not (epoch + 1) % args.val_interval:
             # consider reduce the frequency of validation to save time
@@ -299,12 +412,10 @@ def train(args):
             current_map = float(mean_ap[-1])
         else:
             current_map = 0.
+        save_params(net, logger, best_map, current_map, epoch, args.save_interval, args.save_prefix)
         '''
-        net.save_params('weights/parms_{}.pkl'.format(epoch))
-
-
 
 if __name__ == '__main__':
     args = parse_args()
+    # training
     train(args)
-
