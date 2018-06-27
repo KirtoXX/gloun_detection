@@ -38,20 +38,6 @@ class Group_Conv(nn.HybridBlock):
         out = self.act(out)
         return out
 
-class Head(nn.HybridBlock):
-    def __init__(self,nb_class):
-        super(Head, self).__init__()
-        with self.name_scope():
-            self.share = nn.Dense(1024,activation='relu',weight_initializer=mx.init.Normal(0.01))
-            self.clf = nn.Dense(nb_class+1,weight_initializer=mx.init.Normal(0.01))
-            self.reg = nn.Dense(nb_class*4,weight_initializer=mx.init.Normal(0.01))
-
-    def forward(self, x, *args):
-        x = self.share(x)
-        clf = self.clf(x)
-        reg = self.reg(x)
-        return clf,reg
-
 class LHRCNN(nn.HybridBlock):
     r"""Faster RCNN network.
 
@@ -111,9 +97,10 @@ class LHRCNN(nn.HybridBlock):
 
     """
     def __init__(self, features,scales, ratios, classes,roi_size,
-                 stride=16, rpn_channel=1024, num_sample=128, pos_iou_thresh=0.5,
+                 stride=32, rpn_channel=1024, num_sample=128, pos_iou_thresh=0.5,
                  neg_iou_thresh_high=0.5, neg_iou_thresh_low=0.0, pos_ratio=0.25,
                  nms_thresh=0.3, nms_topk=400, post_nms=100):
+
         #super from rcnn
         super(LHRCNN, self).__init__()
         self.stride = stride
@@ -122,23 +109,29 @@ class LHRCNN(nn.HybridBlock):
         self.num_class = len(classes)+1
         self._target_generator = set([RCNNTargetGenerator(self.num_class)])
         self.k,_ = roi_size
+        self.CT = 10
+
         #--------RCNN parms--------
         self.train_patterns = None
         self.nms_thresh = nms_thresh
         self.nms_topk = nms_topk
         self.post_nms = post_nms
+
+        #-------nn init------------
         with self.name_scope():
             #-------ligth head rcnn setting-------
             self.rpn = RPN(rpn_channel, stride, scales=scales, ratios=ratios)
             self.sampler = RCNNTargetSampler(num_sample, pos_iou_thresh, neg_iou_thresh_high,
                                             neg_iou_thresh_low, pos_ratio)
-            self.head = Head(len(classes))
             self.group_conv = Group_Conv(10*self.k*self.k)
             #-------rcnn setting---------------
             self.box_to_center = BBoxCornerToCenter()
             self.box_decoder = NormalizedBoxCenterDecoder()
             self.cls_decoder = MultiPerClassDecoder(num_class=self.num_class + 1)
             self.features = features
+            self.share = nn.Dense(1024, activation='relu', weight_initializer=mx.init.Normal(0.01))
+            self.clf = nn.Dense(self.num_class + 1, weight_initializer=mx.init.Normal(0.01))
+            self.reg = nn.Dense(self.num_class * 4, weight_initializer=mx.init.Normal(0.01))
 
     @property
     def target_generator(self):
@@ -232,7 +225,7 @@ class LHRCNN(nn.HybridBlock):
         pooled_feat = F.contrib.PSROIPooling(data=feat2,
                                               rois=rpn_roi,
                                               spatial_scale=1. / self.stride,
-                                              output_dim=10,
+                                              output_dim=self.CT,
                                               pooled_size=self.k)
 
         #print(pooled_feat.shape)
@@ -245,10 +238,15 @@ class LHRCNN(nn.HybridBlock):
         box_pred = self.box_predictor(top_feat).reshape(
             (-1, self.num_class, 4)).transpose((1, 0, 2))
         '''
-        print(pooled_feat.shape)
+        ##################################
+        #             head
+        ##################################
+        #print(pooled_feat.shape)
         pooled_feat = F.flatten(pooled_feat)
-        print(pooled_feat.shape)
-        cls_pred,box_pred = self.head(pooled_feat)
+        #print(pooled_feat.shape)
+        shear = self.share(pooled_feat)
+        cls_pred = self.clf(shear)
+        box_pred = self.reg(shear)
         box_pred = box_pred.reshape((-1, self.num_class, 4)).transpose((1, 0, 2))
         # no need to convert bounding boxes in training, just return
         if autograd.is_training():
@@ -311,6 +309,7 @@ def main():
     data = np.zeros((1,3,800,800))
     x = nd.array(data)
     y1,y2,y3 = net(x)
+    print(y1)
 
 if __name__ == '__main__':
     main()
