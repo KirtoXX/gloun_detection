@@ -76,7 +76,7 @@ def parse_args():
     if args.dataset == 'voc':
         args.short = int(args.short) if args.short else 600
         args.max_size = int(args.max_size) if args.max_size else 1000
-        args.epochs = int(args.epochs) if args.epochs else 20
+        args.epochs = int(args.epochs) if args.epochs else 100
         args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '14,20'
         args.lr = float(args.lr) if args.lr else 0.001
         args.lr_warmup = args.lr_warmup if args.lr_warmup else -1
@@ -84,7 +84,7 @@ def parse_args():
     elif args.dataset == 'coco':
         args.short = int(args.short) if args.short else 800
         args.max_size = int(args.max_size) if args.max_size else 1333
-        args.epochs = int(args.epochs) if args.epochs else 24
+        args.epochs = int(args.epochs) if args.epochs else 100
         args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '16,21'
         args.lr = float(args.lr) if args.lr else 0.00125
         args.lr_warmup = args.lr_warmup if args.lr_warmup else 8000
@@ -402,18 +402,8 @@ def train(args):
             btic = time.time()
         msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics])
         logger.info('[Epoch {}] Training cost: {:.3f}, {}'.format(epoch, (time.time()-tic), msg))
-        net.save_params('weights/frcnn.pkl')
-        '''
-        if not (epoch + 1) % args.val_interval:
-            # consider reduce the frequency of validation to save time
-            map_name, mean_ap = validate(net, val_data, ctx, eval_metric)
-            val_msg = '\n'.join(['{}={}'.format(k, v) for k, v in zip(map_name, mean_ap)])
-            logger.info('[Epoch {}] Validation: \n{}'.format(epoch, val_msg))
-            current_map = float(mean_ap[-1])
-        else:
-            current_map = 0.
-        save_params(net, logger, best_map, current_map, epoch, args.save_interval, args.save_prefix)
-        '''
+    net.save_parameters('weights/frcnn.pkl')
+
 
 if __name__ == '__main__':
     args = parse_args()

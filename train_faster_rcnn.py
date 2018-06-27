@@ -20,7 +20,6 @@ from gluoncv.data.transforms.presets.rcnn import FasterRCNNDefaultValTransform
 from gluoncv.utils.metrics.voc_detection import VOC07MApMetric
 from gluoncv.utils.metrics.coco_detection import COCODetectionMetric
 from gluoncv.utils.metrics.accuracy import Accuracy
-from dataset import Dataset
 
 
 def parse_args():
@@ -357,7 +356,6 @@ def train(net, train_data, val_data, eval_metric, args):
                     rcnn_loss = rcnn_loss1 + rcnn_loss2
                     # overall losses
                     losses.append(rpn_loss.sum() + rcnn_loss.sum())
-                    #total_loss = rpn_loss.sum()+rcnn_loss.sum()
                     metric_losses[0].append(rpn_loss1.sum())
                     metric_losses[1].append(rpn_loss2.sum())
                     metric_losses[2].append(rcnn_loss1.sum())
