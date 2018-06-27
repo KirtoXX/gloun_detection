@@ -31,3 +31,14 @@ def Faster_rcnn(pretrained=False, pretrained_base=True,**kwargs):
                            rpn_channel=1024, train_patterns=train_patterns,
                            pretrained=pretrained, **kwargs)
     return model
+
+def main():
+    net = Faster_rcnn(pretrained_base=True)
+    for param in net.collect_params().values():
+        if param._data is not None:
+            continue
+        param.initialize()
+
+if __name__ == '__main__':
+    main()
+

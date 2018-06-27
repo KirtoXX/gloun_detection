@@ -96,8 +96,8 @@ class LHRCNN(nn.HybridBlock):
         to be sampled.
 
     """
-    def __init__(self, features,scales, ratios, classes,roi_size,
-                 stride=32, rpn_channel=1024, num_sample=128, pos_iou_thresh=0.5,
+    def __init__(self, features,scales, ratios, classes,roi_size,train_patterns,
+                 stride=32, rpn_channel=1024,num_sample=128, pos_iou_thresh=0.5,
                  neg_iou_thresh_high=0.5, neg_iou_thresh_low=0.0, pos_ratio=0.25,
                  nms_thresh=0.3, nms_topk=400, post_nms=100):
 
@@ -112,7 +112,7 @@ class LHRCNN(nn.HybridBlock):
         self.CT = 10
 
         #--------RCNN parms--------
-        self.train_patterns = None
+        self.train_patterns = train_patterns
         self.nms_thresh = nms_thresh
         self.nms_topk = nms_topk
         self.post_nms = post_nms
@@ -130,7 +130,7 @@ class LHRCNN(nn.HybridBlock):
             self.cls_decoder = MultiPerClassDecoder(num_class=self.num_class + 1)
             self.features = features
             self.share = nn.Dense(1024, activation='relu', weight_initializer=mx.init.Normal(0.01))
-            self.clf = nn.Dense(self.num_class + 1, weight_initializer=mx.init.Normal(0.01))
+            self.clf = nn.Dense(self.num_class + 1,weight_initializer=mx.init.Normal(0.01))
             self.reg = nn.Dense(self.num_class * 4, weight_initializer=mx.init.Normal(0.01))
 
     @property
@@ -246,6 +246,7 @@ class LHRCNN(nn.HybridBlock):
         #print(pooled_feat.shape)
         shear = self.share(pooled_feat)
         cls_pred = self.clf(shear)
+        cls_pred = F.softmax(cls_pred)
         box_pred = self.reg(shear)
         box_pred = box_pred.reshape((-1, self.num_class, 4)).transpose((1, 0, 2))
         # no need to convert bounding boxes in training, just return
@@ -291,12 +292,14 @@ def My_LHRCNN():
         features.add(getattr(base_network, layer))
     for layer in ['layer4']:
         features.add(getattr(base_network, layer))
+    train_patterns = '|'.join(['.*dense','.*group_conv','.*rpn', '.*stage(2|3|4)_conv'])
     model = LHRCNN(features=features,scales=(2, 4, 8, 16, 32),
                    ratios=(0.5, 1, 2),
                    roi_size=(7,7),
                    stride=32,
                    rpn_channel=512,
-                   classes=my_class)
+                   classes=my_class,
+                   train_patterns=train_patterns)
     print('build finish!')
     return model
 
@@ -306,10 +309,12 @@ def main():
         if param._data is not None:
             continue
         param.initialize()
+    '''
     data = np.zeros((1,3,800,800))
     x = nd.array(data)
     y1,y2,y3 = net(x)
-    print(y1)
+    print(y1.shape)
+    '''
 
 if __name__ == '__main__':
     main()
