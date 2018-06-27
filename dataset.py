@@ -3,8 +3,8 @@ from gluoncv.data.base import VisionDataset
 import mxnet as mx
 import os
 import numpy as np
-from matplotlib import pyplot as plt
-from gluoncv.utils import viz
+#from matplotlib import pyplot as plt
+#from gluoncv.utils import viz
 
 def ann_to_list(ann_path):
     label_list = []

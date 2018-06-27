@@ -21,7 +21,8 @@ from gluoncv.utils.metrics.voc_detection import VOC07MApMetric
 from gluoncv.utils.metrics.coco_detection import COCODetectionMetric
 from gluoncv.utils.metrics.accuracy import Accuracy
 from dataset import Dataset
-
+from gluoncv import model_zoo
+from light_head_rcnn import My_LHRCNN
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Faster-RCNN networks e2e.')
@@ -192,17 +193,13 @@ def get_dataset(dataset, args):
         raise NotImplementedError('Dataset: {} not implemented.'.format(dataset))
     return train_dataset, val_dataset, val_metric
 
-def get_dataloader(net, train_dataset, val_dataset, short, max_size, batch_size, num_workers):
+def get_dataloader(net, train_dataset,batch_size, num_workers,short=800, max_size=1024):
     """Get dataloader."""
     train_bfn = batchify.Tuple(*[batchify.Append() for _ in range(5)])
     train_loader = mx.gluon.data.DataLoader(
         train_dataset.transform(FasterRCNNDefaultTrainTransform(short, max_size, net)),
         batch_size, True, batchify_fn=train_bfn, last_batch='rollover', num_workers=num_workers)
-    val_bfn = batchify.Tuple(*[batchify.Append() for _ in range(3)])
-    val_loader = mx.gluon.data.DataLoader(
-        val_dataset.transform(FasterRCNNDefaultValTransform(short, max_size)),
-        batch_size, False, batchify_fn=val_bfn, last_batch='keep', num_workers=num_workers)
-    return train_loader, val_loader
+    return train_loader
 
 def save_params(net, logger, best_map, current_map, epoch, save_interval, prefix):
     current_map = float(current_map)
@@ -265,7 +262,27 @@ def validate(net, val_data, ctx, eval_metric):
 def get_lr_at_iter(alpha):
     return 1. / 3. * (1 - alpha) + alpha
 
-def train(net, train_data, val_data, eval_metric, args):
+def train(args):
+    ######################################
+    #        hyper parmars set
+    ######################################
+    ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
+    ctx = ctx if ctx else [mx.cpu()]
+    print(ctx)
+    args.batch_size = len(ctx)
+    net = model_zoo.get_model('faster_rcnn_resnet50_v2a_voc', pretrained_base=True)
+    #net = My_LHRCNN()
+    #-----init-------------
+    for param in net.collect_params().values():
+        if param._data is not None:
+            continue
+        param.initialize()
+    #----------------------
+    train_dataset = Dataset()
+    args.batch_size = 1
+    args.num_workers = 1
+    train_data = get_dataloader(net, train_dataset, args.batch_size, args.num_workers)
+    #####################################
     """Training pipeline"""
     net.collect_params().reset_ctx(ctx)
     trainer = gluon.Trainer(
@@ -340,6 +357,9 @@ def train(net, train_data, val_data, eval_metric, args):
                 for data, label, rpn_cls_targets, rpn_box_targets, rpn_box_masks in zip(*batch):
                     gt_label = label[:, :, 4:5]
                     gt_box = label[:, :, :4]
+                    #print(data.shape)
+                    #print(gt_box.shape)
+                    #print(gt_label.shape)
                     cls_pred, box_pred, roi, samples, matches, rpn_score, rpn_box, anchors = net(data, gt_box)
                     # losses of rpn
                     rpn_score = rpn_score.squeeze(axis=-1)
@@ -382,8 +402,8 @@ def train(net, train_data, val_data, eval_metric, args):
             btic = time.time()
 
         msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics])
-        logger.info('[Epoch {}] Training cost: {:.3f}, {}'.format(
-            epoch, (time.time()-tic), msg))
+        logger.info('[Epoch {}] Training cost: {:.3f}, {}'.format(epoch, (time.time()-tic), msg))
+        '''
         if not (epoch + 1) % args.val_interval:
             # consider reduce the frequency of validation to save time
             map_name, mean_ap = validate(net, val_data, ctx, eval_metric)
@@ -393,33 +413,9 @@ def train(net, train_data, val_data, eval_metric, args):
         else:
             current_map = 0.
         save_params(net, logger, best_map, current_map, epoch, args.save_interval, args.save_prefix)
+        '''
 
 if __name__ == '__main__':
     args = parse_args()
-    # fix seed for mxnet, numpy and python builtin random generator.
-    gutils.random.seed(args.seed)
-
-    # training contexts
-    ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
-    ctx = ctx if ctx else [mx.cpu()]
-    args.batch_size = len(ctx)  # 1 batch per device
-
-    # network
-    net_name = '_'.join(('faster_rcnn', args.network, args.dataset))
-    args.save_prefix += net_name
-    net = get_model(net_name, pretrained_base=True)
-    if args.resume.strip():
-        net.load_parameters(args.resume.strip())
-    else:
-        for param in net.collect_params().values():
-            if param._data is not None:
-                continue
-            param.initialize()
-
-    # training data
-    train_dataset, val_dataset, eval_metric = get_dataset(args.dataset, args)
-    train_data, val_data = get_dataloader(
-        net, train_dataset, val_dataset, args.short, args.max_size, args.batch_size, args.num_workers)
-
     # training
-    train(net, train_data, val_data, eval_metric, args)
+    train(args)

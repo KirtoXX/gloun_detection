@@ -164,9 +164,10 @@ def train(args):
     ######################################
     ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
     ctx = ctx if ctx else [mx.cpu()]
+    print(ctx)
     args.batch_size = len(ctx)
     #net = My_LHRCNN()
-    net = model_zoo.get_model('faster_rcnn_resnet50_v2a_voc', pretrained_base=True)
+    net = model_zoo.get_model('faster_rcnn_resnet50_v2a_voc', pretrained_base=False)
     net.initialize()
     train_dataset = Dataset()
     train_data = get_dataloader(net, train_dataset,args.batch_size, args.num_workers)
@@ -231,6 +232,7 @@ def train(args):
         btic = time.time()
         net.hybridize()
         for i, batch in enumerate(train_data):
+            print(train_data)
             batch = split_and_load(batch, ctx_list=ctx)
             batch_size = len(batch[0])
             losses = []
@@ -240,6 +242,9 @@ def train(args):
                 for data, label, rpn_cls_targets, rpn_box_targets, rpn_box_masks in zip(*batch):
                     gt_label = label[:, :, 4:5]
                     gt_box = label[:, :, :4]
+                    #print(data.shape)
+                    #print(gt_box.shape)
+                    #print(gt_label.shape)
                     cls_pred, box_pred, roi, samples, matches, rpn_score, rpn_box, anchors = net(data, gt_box)
                     # losses of rpn
                     rpn_score = rpn_score.squeeze(axis=-1)
