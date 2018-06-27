@@ -400,9 +400,9 @@ def train(args):
                 logger.info('[Epoch {}][Batch {}], Speed: {:.3f} samples/sec, {}'.format(
                     epoch, i, batch_size/(time.time()-btic), msg))
             btic = time.time()
-
         msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics])
         logger.info('[Epoch {}] Training cost: {:.3f}, {}'.format(epoch, (time.time()-tic), msg))
+        net.save_params('weights/frcnn.pkl')
         '''
         if not (epoch + 1) % args.val_interval:
             # consider reduce the frequency of validation to save time
