@@ -106,7 +106,7 @@ class LHRCNN(nn.HybridBlock):
         self.stride = stride
         self._max_batch = 1  # currently only support batch size = 1
         self._max_roi = 100000  # maximum allowed ROIs
-        self.num_class = len(classes)+1
+        self.num_class = len(classes)
         self._target_generator = set([RCNNTargetGenerator(self.num_class)])
         self.k,_ = roi_size
         self.CT = 10
@@ -246,7 +246,6 @@ class LHRCNN(nn.HybridBlock):
         #print(pooled_feat.shape)
         shear = self.share(pooled_feat)
         cls_pred = self.clf(shear)
-        cls_pred = F.softmax(cls_pred)
         box_pred = self.reg(shear)
         box_pred = box_pred.reshape((-1, self.num_class, 4)).transpose((1, 0, 2))
         # no need to convert bounding boxes in training, just return
