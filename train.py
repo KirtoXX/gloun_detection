@@ -162,7 +162,7 @@ class RCNNL1LossMetric(mx.metric.EvalMetric):
         self.sum_metric += loss.asscalar()
         self.num_inst += num_inst.asscalar()
 
-def get_dataloader(net, train_dataset,batch_size, num_workers,short=800, max_size=1024):
+def get_dataloader(net, train_dataset,batch_size, num_workers,short=600, max_size=1000):
     """Get dataloader."""
     train_bfn = batchify.Tuple(*[batchify.Append() for _ in range(5)])
     train_loader = mx.gluon.data.DataLoader(

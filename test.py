@@ -11,7 +11,7 @@ from gluoncv import utils
 def main():
     net = Faster_rcnn(pretrained_base=False)
     net.load_parameters('weights/frcnn_0.pkl')
-    im_fname = 'data/train/img/00e93901213fb80e0f2eab4e3dd12f2eb83894a8.jpg'
+    im_fname = 'data/train/img/00e93901213fb80e1fc75be43dd12f2eb93894ea.jpg'
     x,orig_img = data.transforms.presets.rcnn.load_test(im_fname)
     box_ids, scores, bboxes = net(x)
     ax = utils.viz.plot_bbox(orig_img, bboxes, scores, box_ids)

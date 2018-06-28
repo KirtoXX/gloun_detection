@@ -11,6 +11,7 @@ def ann_to_list(ann_path):
     f = open(ann_path ,mode='r')
     for line in f:
         c ,x1 ,y1 ,x2 ,y2 = line.split(' ')
+        c = c-1
         label_list.append([int(x1) ,int(y1) ,int(x2) ,int(y2),int(c)])
     return label_list
 
